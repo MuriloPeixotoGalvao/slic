@@ -61,8 +61,8 @@ def init_session_state(base_dir: Path | None = None) -> None:
         except Exception:
             pass
 
-        # garante cor de linha padrão
-        st.session_state.setdefault("cfg_stroke_color", "#ff2d2d")
+        # fallback para casos sem config salvo em disco
+        st.session_state.setdefault("cfg_stroke_color", "#FF0000")
 
         # reseta caches/undo/redo e volta para a primeira imagem
         st.session_state["train_img_idx"] = 0

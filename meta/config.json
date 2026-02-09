@@ -5,7 +5,7 @@
   "cfg_enforce_connectivity": true,
   "cfg_img_width": 900,
   "cfg_overlay_alpha": 1.0,
-  "cfg_show_boundaries": true,
+  "cfg_show_boundaries": false,
   "cfg_boundary_thick_px": 1,
   "cfg_expand_on_click": false,
   "cfg_expand_mode": "contíguo",
@@ -20,6 +20,6 @@
   "cfg_supcon_epochs": 200,
   "cfg_supcon_lr": 0.001,
   "cfg_supcon_temp": 0.1,
-  "cfg_stroke_color": "#ff0000",
+  "cfg_stroke_color": "#FF0000",
   "page": "Rotular/Treinar"
 }

@@ -627,10 +627,8 @@ def render_label_train(cfg):
         disp_show_img = Image.fromarray(disp_show)
 
         tool_key = f"tool_{uid_tr}"
-        stroke_color_key = "cfg_stroke_color"
-        st.session_state.setdefault(stroke_color_key, "#ff2d2d")
 
-        tool_col, pred_col, color_col = st.columns([3.0, 1.5, 1.2], gap="small")
+        tool_col, pred_col = st.columns([4.9, 1.7], gap="small")
         with tool_col:
             tool = st.radio(
                 "Ferramenta",
@@ -686,13 +684,6 @@ def render_label_train(cfg):
                                 _bump_click_nonce(uid_tr)
                                 st.toast(f"Predição aplicada em {changed} pixels UNLAB.", icon="✅")
                                 st.rerun()
-        with color_col:
-            st.markdown(
-                "<div style='height: 1.0rem; text-align: right; font-size: 0.95rem;'>Cor da linha</div>",
-                unsafe_allow_html=True,
-            )
-            if tool in ("Polígono", "Freedraw"):
-                st.color_picker("Cor da linha", key=stroke_color_key, label_visibility="collapsed")
 
         # (slider e disp_show já definidos acima)
 
@@ -832,7 +823,7 @@ def render_label_train(cfg):
                     width=int(disp_show.shape[1]),
                     drawing_mode=draw_mode,
                     fill_color=fill,
-                    stroke_color=str(st.session_state.get(stroke_color_key, "#ff2d2d")),
+                    stroke_color=str(getattr(cfg, "stroke_color", "#FF0000")),
                     stroke_width=2,
                     update_streamlit=(tool == "Freedraw"),
                     key=canvas_key,

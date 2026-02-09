@@ -28,6 +28,7 @@ class Cfg:
     supcon_epochs: int
     supcon_lr: float
     supcon_temp: float
+    stroke_color: str
 
     deps: dict
 
@@ -103,7 +104,7 @@ def render_sidebar() -> Cfg:
     st.session_state.setdefault("cfg_supcon_epochs", int(cfg_disk.get("cfg_supcon_epochs", 200)))
     st.session_state.setdefault("cfg_supcon_lr", float(cfg_disk.get("cfg_supcon_lr", 1e-3)))
     st.session_state.setdefault("cfg_supcon_temp", float(cfg_disk.get("cfg_supcon_temp", 0.1)))
-    st.session_state.setdefault("cfg_stroke_color", str(cfg_disk.get("cfg_stroke_color", "#ff2d2d")))
+    stroke_color = str(cfg_disk.get("cfg_stroke_color", "#FF0000")).upper()
 
     # slic params
     st.sidebar.subheader("SLIC")
@@ -166,6 +167,7 @@ def render_sidebar() -> Cfg:
         supcon_epochs=int(supcon_epochs),
         supcon_lr=float(supcon_lr),
         supcon_temp=float(supcon_temp),
+        stroke_color=str(stroke_color),
 
         deps=deps,
     )
@@ -194,7 +196,7 @@ def render_sidebar() -> Cfg:
             "cfg_supcon_epochs": int(supcon_epochs),
             "cfg_supcon_lr": float(supcon_lr),
             "cfg_supcon_temp": float(supcon_temp),
-            "cfg_stroke_color": str(st.session_state.get("cfg_stroke_color", "#ff2d2d")),
+            "cfg_stroke_color": str(stroke_color),
             "page": str(page),
         })
     # também salva no config global do app
@@ -220,7 +222,7 @@ def render_sidebar() -> Cfg:
         "cfg_supcon_epochs": int(supcon_epochs),
         "cfg_supcon_lr": float(supcon_lr),
         "cfg_supcon_temp": float(supcon_temp),
-        "cfg_stroke_color": str(st.session_state.get("cfg_stroke_color", "#ff2d2d")),
+        "cfg_stroke_color": str(stroke_color),
         "page": str(page),
     })
 
