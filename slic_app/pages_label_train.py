@@ -297,6 +297,46 @@ def _maybe_embed_feats(uid: str, img_key: str, feats_z: np.ndarray, cfg) -> np.n
     return feats_space
 
 
+def _predict_superpixel_labels(feats_z: np.ndarray, cfg) -> Tuple[np.ndarray | None, str | None]:
+    """
+    Prediz rótulo por superpixel usando o modelo em memória (kNN ou SupCon+kNN).
+    Retorna (y_pred, erro). Se erro não for None, y_pred vem None.
+    """
+    y_lab = st.session_state.get("MODEL_Y_LAB", None)
+    X_lab = st.session_state.get("MODEL_X_LAB", None)
+    Z_lab = st.session_state.get("MODEL_Z_LAB", None)
+    is_supcon = bool(st.session_state.get("MODEL_IS_SUPCON", False))
+    head = st.session_state.get("MODEL_HEAD", None)
+
+    if y_lab is None or X_lab is None:
+        return None, "Treine o modelo primeiro."
+    if len(y_lab) == 0:
+        return None, "Modelo sem amostras válidas."
+
+    use_supcon = bool(is_supcon and TORCH_OK and (head is not None))
+    query_space = feats_z
+    ref_space = X_lab
+
+    if use_supcon:
+        try:
+            query_space = embed_all_feats(head, feats_z)
+            ref_space = Z_lab if (Z_lab is not None) else embed_all_feats(head, X_lab)
+        except Exception:
+            # Fallback para espaço original caso embedding falhe.
+            query_space = feats_z
+            ref_space = X_lab
+
+    k = int(min(max(1, int(cfg.k_neighbors)), len(y_lab)))
+    y_pred = knn_predict_numpy_balanced(
+        ref_space,
+        y_lab,
+        query_space,
+        k=k,
+        balance=bool(cfg.balance_knn),
+    )
+    return y_pred.astype(np.int32, copy=False), None
+
+
 def _apply_sids_with_undo(
     *,
     uid: str,
@@ -590,7 +630,7 @@ def render_label_train(cfg):
         stroke_color_key = "cfg_stroke_color"
         st.session_state.setdefault(stroke_color_key, "#ff2d2d")
 
-        tool_col, color_col = st.columns([3.0, 1.2], gap="small")
+        tool_col, pred_col, color_col = st.columns([3.0, 1.5, 1.2], gap="small")
         with tool_col:
             tool = st.radio(
                 "Ferramenta",
@@ -599,6 +639,53 @@ def render_label_train(cfg):
                 index=0,
                 key=tool_key,
             )
+        with pred_col:
+            st.markdown("<div style='height: 1.0rem;'></div>", unsafe_allow_html=True)
+            if st.button("Aplicar predição (UNLAB)", key=f"apply_pred_unlab_{uid_tr}", use_container_width=True):
+                unl_mask = (train_labelmap == np.uint16(UNLAB))
+                if not unl_mask.any():
+                    st.toast("Não há pixels UNLAB nesta imagem.", icon="ℹ️")
+                else:
+                    feats_z, _, _ = _get_feats_and_adj(train_key, train_rgb, train_slic)
+                    y_pred_spx, err = _predict_superpixel_labels(feats_z, cfg)
+
+                    if err is not None or y_pred_spx is None:
+                        st.warning(err or "Falha ao predizer.")
+                    else:
+                        pred_pix = y_pred_spx[train_slic]
+                        apply_mask = unl_mask & (pred_pix >= 0)
+
+                        if not apply_mask.any():
+                            st.toast("Nenhuma região UNLAB elegível para aplicar predição.", icon="ℹ️")
+                        else:
+                            changed = 0
+                            classes_n = len(st.session_state.classes)
+                            cls_ids = np.unique(pred_pix[apply_mask].astype(np.int32))
+                            for cid in cls_ids.tolist():
+                                if cid < 0 or cid >= classes_n:
+                                    continue
+                                m = apply_mask & (pred_pix == cid)
+                                if not m.any():
+                                    continue
+                                push_undo_action(uid_tr, train_img_path, m, train_labelmap, np.uint16(cid))
+                                train_labelmap[m] = np.uint16(cid)
+                                changed += int(m.sum())
+
+                            if changed <= 0:
+                                st.toast("Nenhum pixel atualizado.", icon="ℹ️")
+                            else:
+                                _save_everything(
+                                    base_dir=base_dir,
+                                    img_path=train_img_path,
+                                    rgb=train_rgb,
+                                    slic=train_slic,
+                                    labelmap=train_labelmap,
+                                    cfg=cfg,
+                                )
+                                st.session_state.last_processed_click = None
+                                _bump_click_nonce(uid_tr)
+                                st.toast(f"Predição aplicada em {changed} pixels UNLAB.", icon="✅")
+                                st.rerun()
         with color_col:
             st.markdown(
                 "<div style='height: 1.0rem; text-align: right; font-size: 0.95rem;'>Cor da linha</div>",
