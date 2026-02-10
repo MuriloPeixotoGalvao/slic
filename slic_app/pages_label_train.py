@@ -19,6 +19,11 @@ from .persistence import (
     save_label_outputs,
     update_meta_index,
     save_classes,
+    save_knn_bundle,
+    save_supcon_head,
+    load_knn_bundle,
+    load_supcon_head,
+    save_named_model_snapshot,
 )
 from .slic_ops import (
     compute_slic_labels_cached,
@@ -229,11 +234,24 @@ def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 
         name = new_cls_name.strip() if new_cls_name.strip() else f"classe_{len(st.session_state.classes)}"
         st.session_state.classes.append(name)
         st.session_state.active_class = len(st.session_state.classes) - 1
+        ov = dict(st.session_state.get("overlay_visible", {}))
+        ov[len(st.session_state.classes) - 1] = True
+        st.session_state["overlay_visible"] = ov
         save_classes(base_dir, st.session_state.classes)
         st.rerun()
 
+    # Estado persistente de visibilidade da overlay por classe.
+    ov = st.session_state.get("overlay_visible", {})
+    if not isinstance(ov, dict):
+        ov = {}
+    ov_norm: Dict[int, bool] = {}
+    for i in range(len(st.session_state.classes)):
+        ov_norm[i] = bool(ov.get(i, True))
+    st.session_state["overlay_visible"] = ov_norm
+
     cls_options = ["🧽 Borracha"] + [f"{i}: {nm}" for i, nm in enumerate(st.session_state.classes)]
     cur_idx = 0 if st.session_state.active_class == -1 else (st.session_state.active_class + 1)
+
     picked = st.radio(
         "Classe ativa",
         cls_options,
@@ -245,6 +263,17 @@ def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 
         st.session_state.active_class = -1
     else:
         st.session_state.active_class = int(picked.split(":")[0].strip())
+
+    st.markdown("Mostrar overlay por classe")
+    for i, nm in enumerate(st.session_state.classes):
+        c_name, c_chk = st.columns([4.0, 1.0], gap="small")
+        with c_name:
+            st.markdown(f"{i}: {nm}")
+        with c_chk:
+            vis_key = f"{key_prefix}_ov_vis_{i}"
+            st.session_state.setdefault(vis_key, bool(st.session_state["overlay_visible"].get(i, True)))
+            vis_val = st.checkbox("Visível", key=vis_key, label_visibility="collapsed")
+            st.session_state["overlay_visible"][i] = bool(vis_val)
 
     st.caption(
         "Ativa: "
@@ -274,6 +303,17 @@ def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 
     ):
         idx = st.session_state.active_class
         del st.session_state.classes[idx]
+        ov_cur = dict(st.session_state.get("overlay_visible", {}))
+        ov_new: Dict[int, bool] = {}
+        for old_i in range(len(st.session_state.classes) + 1):
+            if old_i == idx:
+                continue
+            new_i = old_i if old_i < idx else old_i - 1
+            if 0 <= new_i < len(st.session_state.classes):
+                ov_new[new_i] = bool(ov_cur.get(old_i, True))
+        for i in range(len(st.session_state.classes)):
+            ov_new.setdefault(i, True)
+        st.session_state["overlay_visible"] = ov_new
         st.session_state.active_class = min(idx, len(st.session_state.classes) - 1)
         save_classes(base_dir, st.session_state.classes)
         st.rerun()
@@ -335,6 +375,25 @@ def _predict_superpixel_labels(feats_z: np.ndarray, cfg) -> Tuple[np.ndarray | N
         balance=bool(cfg.balance_knn),
     )
     return y_pred.astype(np.int32, copy=False), None
+
+
+def _labelmap_for_visible_overlay(labelmap: np.ndarray) -> np.ndarray:
+    """
+    Retorna uma cópia do labelmap onde classes invisíveis viram UNLAB,
+    para ocultar overlay sem alterar os rótulos reais.
+    """
+    ov = st.session_state.get("overlay_visible", {})
+    if not isinstance(ov, dict) or not ov:
+        return labelmap
+
+    hidden = [int(cid) for cid, on in ov.items() if not bool(on)]
+    if not hidden:
+        return labelmap
+
+    lm_vis = labelmap.copy()
+    for cid in hidden:
+        lm_vis[lm_vis == np.uint16(cid)] = np.uint16(UNLAB)
+    return lm_vis
 
 
 def _apply_sids_with_undo(
@@ -469,6 +528,28 @@ def render_label_train(cfg):
     base_dir: Path = cfg.base_dir
     slic_params = cfg.slic_params
 
+    # Auto-load do último modelo salvo em disco (uma vez por pasta em cada sessão).
+    model_scope = str(base_dir.resolve())
+    if st.session_state.get("_auto_model_loaded_for") != model_scope:
+        bundle = load_knn_bundle(base_dir)
+        if isinstance(bundle, dict):
+            st.session_state["MODEL_X_LAB"] = bundle.get("X_lab")
+            st.session_state["MODEL_Y_LAB"] = bundle.get("y_lab")
+            st.session_state["MODEL_Z_LAB"] = bundle.get("Z_lab")
+            st.session_state["MODEL_IS_SUPCON"] = bool(bundle.get("is_supcon", False))
+            st.session_state["MODEL_MODE"] = "SupCon+kNN" if st.session_state["MODEL_IS_SUPCON"] else "kNN"
+            st.session_state["MODEL_SUPCON_CFG"] = bundle.get("supcon_cfg", {})
+            st.session_state["MODEL_LOG"] = []
+
+            if st.session_state["MODEL_IS_SUPCON"]:
+                head, cfg_head = load_supcon_head(base_dir)
+                st.session_state["MODEL_HEAD"] = head
+                if cfg_head is not None:
+                    st.session_state["MODEL_SUPCON_CFG"] = cfg_head
+            else:
+                st.session_state["MODEL_HEAD"] = None
+        st.session_state["_auto_model_loaded_for"] = model_scope
+
     glob_dir = (base_dir / "previews") if (base_dir / "previews").exists() else base_dir
     img_paths = sorted([p for p in glob_dir.glob("*") if p.suffix.lower() in EXTS])
     if not img_paths:
@@ -556,6 +637,11 @@ def render_label_train(cfg):
 
         # cache base/overlay (rápido para slider em tempo real)
         render_nonce = int(st.session_state.get(f"render_nonce_{uid_tr}", 0))
+        ov = st.session_state.get("overlay_visible", {})
+        if isinstance(ov, dict):
+            ov_state = tuple(bool(ov.get(i, True)) for i in range(len(st.session_state.classes)))
+        else:
+            ov_state = tuple(True for _ in range(len(st.session_state.classes)))
         base_meta = (
             uid_tr,
             int(cfg.img_width),
@@ -563,6 +649,7 @@ def render_label_train(cfg):
             bool(cfg.show_boundaries),
             int(cfg.boundary_thick_px),
             tuple(cfg.slic_params),
+            ov_state,
             render_nonce,
         )
         base_meta_key = f"disp_base_meta_{uid_tr}"
@@ -572,10 +659,11 @@ def render_label_train(cfg):
         base_sy1_key = f"disp_sy1_{uid_tr}"
 
         if st.session_state.get(base_meta_key) != base_meta:
+            train_labelmap_vis = _labelmap_for_visible_overlay(train_labelmap)
             train_overlay = overlay_from_labelmap_and_pred(
                 train_rgb,
                 train_slic,
-                train_labelmap,
+                train_labelmap_vis,
                 pred_classes=None,
                 n_classes=len(st.session_state.classes),
                 alpha=float(cfg.overlay_alpha),
@@ -599,11 +687,12 @@ def render_label_train(cfg):
         if disp_base is None or disp_overlay is None or sx1 is None or sy1 is None:
             # fallback (deve ser raro)
             disp_base, sx1, sy1 = resize_for_view(train_rgb, int(cfg.img_width))
+            train_labelmap_vis = _labelmap_for_visible_overlay(train_labelmap)
             disp_overlay = cv2.resize(
                 overlay_from_labelmap_and_pred(
                     train_rgb,
                     train_slic,
-                    train_labelmap,
+                    train_labelmap_vis,
                     pred_classes=None,
                     n_classes=len(st.session_state.classes),
                     alpha=float(cfg.overlay_alpha),
@@ -1005,7 +1094,7 @@ def render_label_train(cfg):
         y = np.concatenate(y_list).astype(np.int32)
         return X, y
 
-    colT1, colT2, colT3 = st.columns([1.2, 1, 1])
+    colT1, colT2, colT3, colT4 = st.columns([1.2, 1, 1, 1.2])
 
     with colT1:
         if st.button("🏋️ Treinar (todas as imagens rotuladas)", key="btn_train"):
@@ -1019,8 +1108,6 @@ def render_label_train(cfg):
                 elif (cnt < 2).any():
                     st.error("Cada classe precisa de **≥2 amostras**.")
                 else:
-                    from .persistence import save_knn_bundle, save_supcon_head
-
                     save_classes(base_dir, st.session_state.classes)
 
                     if cfg.train_mode.startswith("SupCon"):
@@ -1083,8 +1170,6 @@ def render_label_train(cfg):
                             st.session_state.emb_cache.clear()
                             st.success("SupCon+kNN treinado e salvo em disco!")
                     else:
-                        from .persistence import save_knn_bundle
-
                         st.session_state["MODEL_MODE"] = "kNN"
                         st.session_state["MODEL_X_LAB"] = X_lab
                         st.session_state["MODEL_Y_LAB"] = y_lab
@@ -1139,6 +1224,42 @@ def render_label_train(cfg):
             st.session_state.pred_cache.clear()
             st.session_state.emb_cache.clear()
             st.success("Modelo e predições limpos (memória).")
+
+    with colT4:
+        model_name = st.text_input("Nome do modelo", value="", placeholder="ex: soja_v1", key="save_model_name")
+        if st.button("💾 Salvar modelo", key="btn_save_named_model", use_container_width=True):
+            y_lab = st.session_state.get("MODEL_Y_LAB", None)
+            X_lab = st.session_state.get("MODEL_X_LAB", None)
+            Z_lab = st.session_state.get("MODEL_Z_LAB", None)
+            is_supcon = bool(st.session_state.get("MODEL_IS_SUPCON", False))
+            head = st.session_state.get("MODEL_HEAD", None)
+            cfg_head = st.session_state.get("MODEL_SUPCON_CFG", {"in_dim": 12, "hidden": 64, "out_dim": 32, "p_drop": 0.1})
+
+            if y_lab is None or X_lab is None:
+                st.error("Treine ou carregue um modelo antes de salvar.")
+            else:
+                # salva os artefatos ativos em meta/ (carregados automaticamente no próximo início)
+                save_knn_bundle(
+                    base_dir,
+                    X_lab=X_lab,
+                    y_lab=y_lab,
+                    is_supcon=is_supcon,
+                    Z_lab=Z_lab,
+                    slic_params=slic_params,
+                    supcon_cfg=(cfg_head if is_supcon else None),
+                )
+                if is_supcon and head is not None:
+                    try:
+                        save_supcon_head(base_dir, head, cfg_head)
+                    except Exception:
+                        pass
+
+                # salva também snapshot nomeado em meta/models/
+                try:
+                    out = save_named_model_snapshot(base_dir, model_name=model_name, is_supcon=is_supcon)
+                    st.success(f"Modelo salvo: {Path(out['bundle']).name}")
+                except Exception as e:
+                    st.error(f"Falha ao salvar snapshot do modelo: {e}")
 
     # =========================================================================
     # ④ Exportar dataset rotulado

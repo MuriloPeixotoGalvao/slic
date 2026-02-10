@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
+import shutil
+from datetime import datetime
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -203,6 +206,48 @@ def save_knn_bundle(
     )
 
 
+def load_knn_bundle(base_dir: Path) -> Optional[Dict[str, Any]]:
+    """
+    Carrega knn_bundle.npz salvo em disco.
+    Retorna dict com campos do modelo ou None se não existir/inválido.
+    """
+    dirs = ensure_out_dirs(base_dir)
+    p = dirs["meta"] / "knn_bundle.npz"
+    if not p.exists():
+        return None
+    try:
+        obj = np.load(p, allow_pickle=True)
+        X_lab = obj["X_lab"].astype(np.float32)
+        y_lab = obj["y_lab"].astype(np.int32)
+        is_supcon = bool(int(np.array(obj["is_supcon"]).reshape(-1)[0]))
+        Z_raw = obj["Z_lab"]
+        Z_lab = None if Z_raw.size == 0 else Z_raw.astype(np.float32)
+        slic_params_raw = tuple(obj["slic_params"].tolist())
+        if len(slic_params_raw) == 4:
+            slic_params = (
+                int(slic_params_raw[0]),
+                float(slic_params_raw[1]),
+                float(slic_params_raw[2]),
+                bool(slic_params_raw[3]),
+            )
+        else:
+            slic_params = None
+        supcon_cfg_raw = obj["supcon_cfg"]
+        if isinstance(supcon_cfg_raw, np.ndarray):
+            supcon_cfg_raw = supcon_cfg_raw.item() if supcon_cfg_raw.size else "{}"
+        supcon_cfg = json.loads(str(supcon_cfg_raw)) if str(supcon_cfg_raw).strip() else {}
+        return {
+            "X_lab": X_lab,
+            "y_lab": y_lab,
+            "is_supcon": is_supcon,
+            "Z_lab": Z_lab,
+            "slic_params": slic_params,
+            "supcon_cfg": supcon_cfg if isinstance(supcon_cfg, dict) else {},
+        }
+    except Exception:
+        return None
+
+
 def save_supcon_head(base_dir: Path, head: "ContrastiveHead", cfg_head: Dict[str, Any]) -> None:
     """
     Salva o state_dict do head + cfg.
@@ -247,3 +292,41 @@ def load_supcon_head(base_dir: Path) -> Tuple[Optional["ContrastiveHead"], Optio
     head.load_state_dict(sd)
     head.eval()
     return head, cfg
+
+
+def save_named_model_snapshot(base_dir: Path, model_name: str, is_supcon: bool) -> Dict[str, str]:
+    """
+    Salva uma cópia nomeada dos arquivos atuais do modelo (bundle e, se existir, head SupCon).
+    Requer que os arquivos padrão já tenham sido salvos em meta/.
+    """
+    dirs = ensure_out_dirs(base_dir)
+    meta_dir = dirs["meta"]
+    models_dir = meta_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", (model_name or "").strip()).strip("._-")
+    if not safe:
+        safe = "modelo"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = f"{safe}__{ts}"
+
+    src_bundle = meta_dir / "knn_bundle.npz"
+    if not src_bundle.exists():
+        raise FileNotFoundError("knn_bundle.npz não encontrado para snapshot.")
+    dst_bundle = models_dir / f"{stem}__knn_bundle.npz"
+    shutil.copy2(src_bundle, dst_bundle)
+
+    out: Dict[str, str] = {"bundle": str(dst_bundle)}
+
+    if is_supcon:
+        src_head = meta_dir / "supcon_head.pt"
+        src_head_cfg = meta_dir / "supcon_head_cfg.json"
+        if src_head.exists() and src_head_cfg.exists():
+            dst_head = models_dir / f"{stem}__supcon_head.pt"
+            dst_head_cfg = models_dir / f"{stem}__supcon_head_cfg.json"
+            shutil.copy2(src_head, dst_head)
+            shutil.copy2(src_head_cfg, dst_head_cfg)
+            out["head"] = str(dst_head)
+            out["head_cfg"] = str(dst_head_cfg)
+
+    return out
