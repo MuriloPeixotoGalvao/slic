@@ -4,7 +4,7 @@
   "cfg_sigma": 0.0,
   "cfg_enforce_connectivity": false,
   "cfg_img_width": 900,
-  "cfg_overlay_alpha": 0.5,
+  "cfg_overlay_alpha": 1.0,
   "cfg_show_boundaries": false,
   "cfg_boundary_thick_px": 1,
   "cfg_expand_on_click": false,

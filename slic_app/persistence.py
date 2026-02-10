@@ -31,23 +31,53 @@ def ensure_out_dirs(base_dir: Path) -> Dict[str, Path]:
     return dirs
 
 
-def image_uid(img_path: Path) -> str:
+def image_uid(img_path: Path, base_dir: Optional[Path] = None) -> str:
     """
-    UID estável (pelo caminho absoluto). Evita colisão em stems iguais.
+    UID estável.
+    - Preferencialmente por caminho relativo ao base_dir (portável entre PCs).
+    - Fallback: caminho absoluto.
     """
-    s = str(Path(img_path).resolve()).encode("utf-8", errors="ignore")
+    p = Path(img_path)
+    if base_dir is not None:
+        try:
+            rel = p.resolve().relative_to(Path(base_dir).resolve())
+            s = str(rel.as_posix()).encode("utf-8", errors="ignore")
+        except Exception:
+            s = str(p.resolve()).encode("utf-8", errors="ignore")
+    else:
+        s = str(p.resolve()).encode("utf-8", errors="ignore")
     return hashlib.md5(s).hexdigest()[:12]
+
+
+def _rel_image_path(base_dir: Path, img_path: Path) -> Optional[Path]:
+    """
+    Caminho relativo da imagem dentro do projeto, para persistência portável.
+    """
+    try:
+        return Path(img_path).resolve().relative_to(Path(base_dir).resolve())
+    except Exception:
+        return None
 
 
 def _labelmap_path(base_dir: Path, img_path: Path) -> Path:
     dirs = ensure_out_dirs(base_dir)
-    uid = image_uid(img_path)
+    rel = _rel_image_path(base_dir, img_path)
+    if rel is not None:
+        p = dirs["labelmaps"] / rel.with_suffix(".npy")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    uid = image_uid(img_path, base_dir=base_dir)
     return dirs["labelmaps"] / f"{img_path.stem}__{uid}.npy"
 
 
 def _overlay_path(base_dir: Path, img_path: Path) -> Path:
     dirs = ensure_out_dirs(base_dir)
-    uid = image_uid(img_path)
+    rel = _rel_image_path(base_dir, img_path)
+    if rel is not None:
+        p = dirs["overlays"] / rel.with_suffix(".png")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    uid = image_uid(img_path, base_dir=base_dir)
     return dirs["overlays"] / f"{img_path.stem}__{uid}.png"
 
 
@@ -162,7 +192,7 @@ def update_meta_index(base_dir: Path, img_path: Path) -> None:
     """
     base_dir = Path(base_dir)
     p = _index_path(base_dir)
-    uid = image_uid(img_path)
+    uid = image_uid(img_path, base_dir=base_dir)
 
     try:
         idx = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
