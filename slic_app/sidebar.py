@@ -2,7 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import streamlit as st
-from .persistence import save_config, clear_config, load_config
+from .persistence import load_config
+
 
 @dataclass
 class Cfg:
@@ -28,8 +29,12 @@ class Cfg:
     supcon_epochs: int
     supcon_lr: float
     supcon_temp: float
+    rf_n_estimators: int
+    rf_max_depth: int
+    rf_min_samples_leaf: int
 
     deps: dict
+
 
 def _has_img_coord() -> bool:
     try:
@@ -38,6 +43,7 @@ def _has_img_coord() -> bool:
     except Exception:
         return False
 
+
 def _has_canvas() -> bool:
     try:
         import streamlit_drawable_canvas  # noqa
@@ -45,41 +51,35 @@ def _has_canvas() -> bool:
     except Exception:
         return False
 
+
 def render_sidebar() -> Cfg:
-    st.sidebar.header("🧩 SLIC Labeler")
+    st.sidebar.header("SLIC Labeler")
 
     # base dir (widget lives in app.py to avoid duplicate key)
     base_dir_str = st.session_state.get("base_dir_str", "")
     base_dir = Path(base_dir_str).expanduser()
     app_root = Path(__file__).resolve().parents[1]
 
-    # carregar config do disco antes de criar widgets
-    cfg_disk = load_config(base_dir) if (base_dir_str and base_dir.exists()) else {}
-    if not cfg_disk:
-        # fallback: config global do app
-        cfg_disk = load_config(app_root)
-    cfg_loaded_key = "_cfg_loaded_for"
-    cur_cfg_scope = str(base_dir.resolve()) if (base_dir_str and base_dir.exists()) else ""
-
-    # aplica config do disco uma única vez por base_dir (evita sobrescrever em rerun)
-    if cur_cfg_scope and st.session_state.get(cfg_loaded_key) != cur_cfg_scope:
+    # defaults globais vindos de <repo>/meta/config.json (somente leitura)
+    cfg_disk = load_config(app_root)
+    cfg_loaded_key = "_cfg_defaults_loaded_once"
+    if not st.session_state.get(cfg_loaded_key, False):
         for k, v in cfg_disk.items():
             if k.startswith("cfg_"):
                 st.session_state[k] = v
-        st.session_state[cfg_loaded_key] = cur_cfg_scope
+        st.session_state[cfg_loaded_key] = True
 
     # page (carrega do config antes do widget)
     st.session_state.setdefault("page", str(cfg_disk.get("page", "Rotular/Treinar")))
     page = st.sidebar.radio("Página", ["Rotular/Treinar", "Predição (upload)"], key="page")
 
-    # restore defaults (clear config.json)
-    if base_dir_str and base_dir.exists():
-        if st.sidebar.button("Restaurar defaults", key="btn_reset_cfg", use_container_width=True):
-            clear_config(base_dir)
-            for k in list(st.session_state.keys()):
-                if k.startswith("cfg_") or k == "page":
-                    st.session_state.pop(k, None)
-            st.rerun()
+    # restaura os defaults do arquivo meta/config.json, sem salvar nada em disco
+    if st.sidebar.button("Restaurar defaults", key="btn_reset_cfg", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            if k.startswith("cfg_"):
+                st.session_state.pop(k, None)
+        st.session_state.pop(cfg_loaded_key, None)
+        st.rerun()
 
     # defaults locais (evita warning de value + session_state)
     st.session_state.setdefault("cfg_n_segments", int(cfg_disk.get("cfg_n_segments", 2000)))
@@ -103,7 +103,10 @@ def render_sidebar() -> Cfg:
     st.session_state.setdefault("cfg_supcon_epochs", int(cfg_disk.get("cfg_supcon_epochs", 200)))
     st.session_state.setdefault("cfg_supcon_lr", float(cfg_disk.get("cfg_supcon_lr", 1e-3)))
     st.session_state.setdefault("cfg_supcon_temp", float(cfg_disk.get("cfg_supcon_temp", 0.1)))
-    st.session_state.setdefault("cfg_stroke_color", str(cfg_disk.get("cfg_stroke_color", "#ff2d2d")))
+    st.session_state.setdefault("cfg_rf_n_estimators", int(cfg_disk.get("cfg_rf_n_estimators", 300)))
+    st.session_state.setdefault("cfg_rf_max_depth", int(cfg_disk.get("cfg_rf_max_depth", 20)))
+    st.session_state.setdefault("cfg_rf_min_samples_leaf", int(cfg_disk.get("cfg_rf_min_samples_leaf", 2)))
+    st.session_state.setdefault("cfg_stroke_color", str(cfg_disk.get("cfg_stroke_color", "#ff0000")))
 
     # slic params
     st.sidebar.subheader("SLIC")
@@ -120,7 +123,7 @@ def render_sidebar() -> Cfg:
     boundary_thick_px = st.sidebar.slider("Espessura borda (px)", 1, 6, step=1, key="cfg_boundary_thick_px")
 
     # click expansion
-    st.sidebar.subheader("Clique → expansão")
+    st.sidebar.subheader("Clique -> expansão")
     expand_on_click = st.sidebar.checkbox("Expandir por similaridade", key="cfg_expand_on_click")
     expand_mode = st.sidebar.selectbox("Modo", ["contíguo", "global"], key="cfg_expand_mode")
     dist_thr = st.sidebar.slider("dist_thr", 0.1, 6.0, step=0.1, key="cfg_dist_thr")
@@ -128,12 +131,17 @@ def render_sidebar() -> Cfg:
 
     # treino
     st.sidebar.subheader("Treino / kNN")
-    train_mode = st.sidebar.selectbox("Modo de treino", ["kNN", "SupCon+kNN"], key="cfg_train_mode")
+    train_mode = st.sidebar.selectbox("Modo de treino", ["kNN", "SupCon+kNN", "RandomForest"], key="cfg_train_mode")
     k_neighbors = st.sidebar.slider("k (vizinhos)", 1, 50, step=1, key="cfg_k_neighbors")
     balance_knn = st.sidebar.checkbox("Balancear voto (anti-desbalanceamento)", key="cfg_balance_knn")
     min_frac = st.sidebar.slider("min_frac (maioria p/ SPX)", 0.1, 1.0, step=0.05, key="cfg_min_frac")
     apply_preds_only_unlabeled = st.sidebar.checkbox("Predição só em UNLAB", key="cfg_apply_preds_only_unlabeled")
     use_model_embedding_for_click = st.sidebar.checkbox("Clique usa embedding SupCon (se existir)", key="cfg_use_model_embedding_for_click")
+
+    st.sidebar.subheader("RandomForest")
+    rf_n_estimators = st.sidebar.slider("árvores", 50, 1000, step=50, key="cfg_rf_n_estimators")
+    rf_max_depth = st.sidebar.slider("max_depth", 2, 80, step=1, key="cfg_rf_max_depth")
+    rf_min_samples_leaf = st.sidebar.slider("min_samples_leaf", 1, 20, step=1, key="cfg_rf_min_samples_leaf")
 
     # supcon params
     st.sidebar.subheader("SupCon")
@@ -150,78 +158,23 @@ def render_sidebar() -> Cfg:
         show_boundaries=bool(show_boundaries),
         boundary_thick_px=int(boundary_thick_px),
         img_width=int(img_width),
-
         expand_on_click=bool(expand_on_click),
         expand_mode=str(expand_mode),
         dist_thr=float(dist_thr),
         max_region=int(max_region),
         min_frac=float(min_frac),
-
         train_mode=str(train_mode),
         k_neighbors=int(k_neighbors),
         balance_knn=bool(balance_knn),
         apply_preds_only_unlabeled=bool(apply_preds_only_unlabeled),
         use_model_embedding_for_click=bool(use_model_embedding_for_click),
-
         supcon_epochs=int(supcon_epochs),
         supcon_lr=float(supcon_lr),
         supcon_temp=float(supcon_temp),
-
+        rf_n_estimators=int(rf_n_estimators),
+        rf_max_depth=int(rf_max_depth),
+        rf_min_samples_leaf=int(rf_min_samples_leaf),
         deps=deps,
     )
-
-    # Persistir configuração (se base_dir válido)
-    if base_dir_str and base_dir.exists():
-        save_config(base_dir, {
-            "cfg_n_segments": int(n_segments),
-            "cfg_compactness": float(compactness),
-            "cfg_sigma": float(sigma),
-            "cfg_enforce_connectivity": bool(enforce_conn),
-            "cfg_img_width": int(img_width),
-            "cfg_overlay_alpha": float(overlay_alpha),
-            "cfg_show_boundaries": bool(show_boundaries),
-            "cfg_boundary_thick_px": int(boundary_thick_px),
-            "cfg_expand_on_click": bool(expand_on_click),
-            "cfg_expand_mode": str(expand_mode),
-            "cfg_dist_thr": float(dist_thr),
-            "cfg_max_region": int(max_region),
-            "cfg_train_mode": str(train_mode),
-            "cfg_k_neighbors": int(k_neighbors),
-            "cfg_balance_knn": bool(balance_knn),
-            "cfg_min_frac": float(min_frac),
-            "cfg_apply_preds_only_unlabeled": bool(apply_preds_only_unlabeled),
-            "cfg_use_model_embedding_for_click": bool(use_model_embedding_for_click),
-            "cfg_supcon_epochs": int(supcon_epochs),
-            "cfg_supcon_lr": float(supcon_lr),
-            "cfg_supcon_temp": float(supcon_temp),
-            "cfg_stroke_color": str(st.session_state.get("cfg_stroke_color", "#ff2d2d")),
-            "page": str(page),
-        })
-    # também salva no config global do app
-    save_config(app_root, {
-        "cfg_n_segments": int(n_segments),
-        "cfg_compactness": float(compactness),
-        "cfg_sigma": float(sigma),
-        "cfg_enforce_connectivity": bool(enforce_conn),
-        "cfg_img_width": int(img_width),
-        "cfg_overlay_alpha": float(overlay_alpha),
-        "cfg_show_boundaries": bool(show_boundaries),
-        "cfg_boundary_thick_px": int(boundary_thick_px),
-        "cfg_expand_on_click": bool(expand_on_click),
-        "cfg_expand_mode": str(expand_mode),
-        "cfg_dist_thr": float(dist_thr),
-        "cfg_max_region": int(max_region),
-        "cfg_train_mode": str(train_mode),
-        "cfg_k_neighbors": int(k_neighbors),
-        "cfg_balance_knn": bool(balance_knn),
-        "cfg_min_frac": float(min_frac),
-        "cfg_apply_preds_only_unlabeled": bool(apply_preds_only_unlabeled),
-        "cfg_use_model_embedding_for_click": bool(use_model_embedding_for_click),
-        "cfg_supcon_epochs": int(supcon_epochs),
-        "cfg_supcon_lr": float(supcon_lr),
-        "cfg_supcon_temp": float(supcon_temp),
-        "cfg_stroke_color": str(st.session_state.get("cfg_stroke_color", "#ff2d2d")),
-        "page": str(page),
-    })
 
     return cfg

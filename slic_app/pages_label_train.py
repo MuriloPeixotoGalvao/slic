@@ -19,6 +19,8 @@ from .persistence import (
     save_label_outputs,
     update_meta_index,
     save_classes,
+    save_knn_bundle,
+    save_supcon_head,
 )
 from .slic_ops import (
     compute_slic_labels_cached,
@@ -33,6 +35,13 @@ from .undo import push_undo_action, undo_last_click, redo_last_click
 from .knn import knn_predict_numpy_balanced
 from .supcon import TORCH_OK, train_supcon_on_feats, embed_all_feats
 from .exporter import build_labeled_dataset_zip
+
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    RF_OK = True
+except Exception:
+    RandomForestClassifier = None
+    RF_OK = False
 
 
 # ---------------------------------------------------------------------
@@ -222,6 +231,7 @@ def _save_everything(
 def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 🎨 Classes") -> None:
     st.markdown(title)
     id2name = {i: nm for i, nm in enumerate(st.session_state.classes)}
+    overlay_visible = st.session_state.setdefault("overlay_visible", {})
 
     c1, c2 = st.columns([2.2, 1])
     new_cls_name = c1.text_input("Nova classe", "", placeholder="ex: folha, solo, tronco…", key=f"{key_prefix}_new_cls")
@@ -255,6 +265,19 @@ def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 
         )
     )
 
+    st.markdown("Mostrar overlay por classe")
+    next_overlay_visible = {}
+    for i, nm in enumerate(st.session_state.classes):
+        c_name, c_chk = st.columns([5.0, 1.0], gap="small")
+        with c_name:
+            st.markdown(f"{i}: {nm}")
+        with c_chk:
+            vis_key = f"{key_prefix}_ov_vis_{i}"
+            st.session_state.setdefault(vis_key, bool(overlay_visible.get(i, True)))
+            vis_val = st.checkbox("Visível", key=vis_key, label_visibility="collapsed")
+            next_overlay_visible[i] = bool(vis_val)
+    st.session_state["overlay_visible"] = next_overlay_visible
+
     ac = st.session_state.active_class
     if 0 <= ac < len(st.session_state.classes):
         r1, r2 = st.columns([3, 1])
@@ -275,6 +298,9 @@ def _render_classes_panel(base_dir: Path, *, key_prefix: str, title: str = "### 
         idx = st.session_state.active_class
         del st.session_state.classes[idx]
         st.session_state.active_class = min(idx, len(st.session_state.classes) - 1)
+        # Reindexa visibilidade para acompanhar os novos ids.
+        ov_old = dict(st.session_state.get("overlay_visible", {}))
+        st.session_state["overlay_visible"] = {i: bool(ov_old.get(i if i < idx else i + 1, True)) for i in range(len(st.session_state.classes))}
         save_classes(base_dir, st.session_state.classes)
         st.rerun()
 
@@ -302,6 +328,16 @@ def _predict_superpixel_labels(feats_z: np.ndarray, cfg) -> Tuple[np.ndarray | N
     Prediz rótulo por superpixel usando o modelo em memória (kNN ou SupCon+kNN).
     Retorna (y_pred, erro). Se erro não for None, y_pred vem None.
     """
+    model_mode = str(st.session_state.get("MODEL_MODE", "kNN"))
+    if model_mode == "RandomForest":
+        rf = st.session_state.get("MODEL_RF", None)
+        if rf is None:
+            return None, "Modelo RandomForest não está carregado."
+        try:
+            return rf.predict(feats_z).astype(np.int32, copy=False), None
+        except Exception as e:
+            return None, f"Falha na predição RandomForest: {e}"
+
     y_lab = st.session_state.get("MODEL_Y_LAB", None)
     X_lab = st.session_state.get("MODEL_X_LAB", None)
     Z_lab = st.session_state.get("MODEL_Z_LAB", None)
@@ -563,6 +599,7 @@ def render_label_train(cfg):
             bool(cfg.show_boundaries),
             int(cfg.boundary_thick_px),
             tuple(cfg.slic_params),
+            tuple(bool(st.session_state.get("overlay_visible", {}).get(i, True)) for i in range(len(st.session_state.classes))),
             render_nonce,
         )
         base_meta_key = f"disp_base_meta_{uid_tr}"
@@ -572,10 +609,16 @@ def render_label_train(cfg):
         base_sy1_key = f"disp_sy1_{uid_tr}"
 
         if st.session_state.get(base_meta_key) != base_meta:
+            overlay_visible = st.session_state.get("overlay_visible", {})
+            labelmap_for_overlay = train_labelmap.copy()
+            for cid in range(len(st.session_state.classes)):
+                if not bool(overlay_visible.get(cid, True)):
+                    labelmap_for_overlay[labelmap_for_overlay == np.uint16(cid)] = np.uint16(UNLAB)
+
             train_overlay = overlay_from_labelmap_and_pred(
                 train_rgb,
                 train_slic,
-                train_labelmap,
+                labelmap_for_overlay,
                 pred_classes=None,
                 n_classes=len(st.session_state.classes),
                 alpha=float(cfg.overlay_alpha),
@@ -599,11 +642,17 @@ def render_label_train(cfg):
         if disp_base is None or disp_overlay is None or sx1 is None or sy1 is None:
             # fallback (deve ser raro)
             disp_base, sx1, sy1 = resize_for_view(train_rgb, int(cfg.img_width))
+            overlay_visible = st.session_state.get("overlay_visible", {})
+            labelmap_for_overlay = train_labelmap.copy()
+            for cid in range(len(st.session_state.classes)):
+                if not bool(overlay_visible.get(cid, True)):
+                    labelmap_for_overlay[labelmap_for_overlay == np.uint16(cid)] = np.uint16(UNLAB)
+
             disp_overlay = cv2.resize(
                 overlay_from_labelmap_and_pred(
                     train_rgb,
                     train_slic,
-                    train_labelmap,
+                    labelmap_for_overlay,
                     pred_classes=None,
                     n_classes=len(st.session_state.classes),
                     alpha=float(cfg.overlay_alpha),
@@ -628,9 +677,9 @@ def render_label_train(cfg):
 
         tool_key = f"tool_{uid_tr}"
         stroke_color_key = "cfg_stroke_color"
-        st.session_state.setdefault(stroke_color_key, "#ff2d2d")
+        st.session_state.setdefault(stroke_color_key, "#ff0000")
 
-        tool_col, pred_col, color_col = st.columns([3.0, 1.5, 1.2], gap="small")
+        tool_col, pred_col = st.columns([3.0, 1.5], gap="small")
         with tool_col:
             tool = st.radio(
                 "Ferramenta",
@@ -686,13 +735,8 @@ def render_label_train(cfg):
                                 _bump_click_nonce(uid_tr)
                                 st.toast(f"Predição aplicada em {changed} pixels UNLAB.", icon="✅")
                                 st.rerun()
-        with color_col:
-            st.markdown(
-                "<div style='height: 1.0rem; text-align: right; font-size: 0.95rem;'>Cor da linha</div>",
-                unsafe_allow_html=True,
-            )
-            if tool in ("Polígono", "Freedraw"):
-                st.color_picker("Cor da linha", key=stroke_color_key, label_visibility="collapsed")
+        # Cor fixa da linha (sem seletor na UI)
+        st.session_state[stroke_color_key] = "#ff0000"
 
         # (slider e disp_show já definidos acima)
 
@@ -832,7 +876,7 @@ def render_label_train(cfg):
                     width=int(disp_show.shape[1]),
                     drawing_mode=draw_mode,
                     fill_color=fill,
-                    stroke_color=str(st.session_state.get(stroke_color_key, "#ff2d2d")),
+                    stroke_color=str(st.session_state.get(stroke_color_key, "#ff0000")),
                     stroke_width=2,
                     update_streamlit=(tool == "Freedraw"),
                     key=canvas_key,
@@ -1028,17 +1072,39 @@ def render_label_train(cfg):
                 elif (cnt < 2).any():
                     st.error("Cada classe precisa de **≥2 amostras**.")
                 else:
-                    from .persistence import save_knn_bundle, save_supcon_head
-
                     save_classes(base_dir, st.session_state.classes)
 
-                    if cfg.train_mode.startswith("SupCon"):
+                    if str(cfg.train_mode) == "RandomForest":
+                        if not RF_OK:
+                            st.error("scikit-learn não disponível. Instale com: pip install scikit-learn")
+                        else:
+                            rf = RandomForestClassifier(
+                                n_estimators=int(getattr(cfg, "rf_n_estimators", 300)),
+                                max_depth=int(getattr(cfg, "rf_max_depth", 20)),
+                                min_samples_leaf=int(getattr(cfg, "rf_min_samples_leaf", 2)),
+                                class_weight="balanced",
+                                random_state=42,
+                                n_jobs=-1,
+                            )
+                            rf.fit(X_lab, y_lab)
+                            st.session_state["MODEL_MODE"] = "RandomForest"
+                            st.session_state["MODEL_RF"] = rf
+                            st.session_state["MODEL_X_LAB"] = X_lab
+                            st.session_state["MODEL_Y_LAB"] = y_lab
+                            st.session_state["MODEL_IS_SUPCON"] = False
+                            st.session_state["MODEL_Z_LAB"] = None
+                            st.session_state["MODEL_HEAD"] = None
+                            st.session_state["MODEL_LOG"] = []
+                            st.success("RandomForest treinado em memória!")
+
+                    elif cfg.train_mode.startswith("SupCon"):
                         if not TORCH_OK:
                             st.warning("PyTorch indisponível; usando k-NN (NumPy).")
                             st.session_state["MODEL_MODE"] = "kNN"
                             st.session_state["MODEL_X_LAB"] = X_lab
                             st.session_state["MODEL_Y_LAB"] = y_lab
                             st.session_state["MODEL_IS_SUPCON"] = False
+                            st.session_state["MODEL_RF"] = None
                             st.session_state["MODEL_Z_LAB"] = None
                             st.session_state["MODEL_HEAD"] = None
                             st.session_state["MODEL_LOG"] = []
@@ -1084,6 +1150,7 @@ def render_label_train(cfg):
                             st.session_state["MODEL_Z_LAB"] = Z_lab
                             st.session_state["MODEL_Y_LAB"] = y_lab
                             st.session_state["MODEL_IS_SUPCON"] = True
+                            st.session_state["MODEL_RF"] = None
                             st.session_state["MODEL_LOG"] = loss_log
                             st.session_state["MODEL_SUPCON_CFG"] = cfg_head
 
@@ -1092,12 +1159,11 @@ def render_label_train(cfg):
                             st.session_state.emb_cache.clear()
                             st.success("SupCon+kNN treinado e salvo em disco!")
                     else:
-                        from .persistence import save_knn_bundle
-
                         st.session_state["MODEL_MODE"] = "kNN"
                         st.session_state["MODEL_X_LAB"] = X_lab
                         st.session_state["MODEL_Y_LAB"] = y_lab
                         st.session_state["MODEL_IS_SUPCON"] = False
+                        st.session_state["MODEL_RF"] = None
                         st.session_state["MODEL_Z_LAB"] = None
                         st.session_state["MODEL_HEAD"] = None
                         st.session_state["MODEL_LOG"] = []
@@ -1109,13 +1175,25 @@ def render_label_train(cfg):
             if st.session_state.get("MODEL_Y_LAB") is None:
                 st.error("Treine o modelo primeiro.")
             else:
+                mode = str(st.session_state.get("MODEL_MODE", "kNN"))
                 y_lab = st.session_state["MODEL_Y_LAB"]
                 X_lab = st.session_state.get("MODEL_X_LAB", None)
                 Z_lab = st.session_state.get("MODEL_Z_LAB", None)
                 is_supcon = bool(st.session_state.get("MODEL_IS_SUPCON", False))
                 head = st.session_state.get("MODEL_HEAD", None)
+                rf = st.session_state.get("MODEL_RF", None)
 
-                if X_lab is None or y_lab is None:
+                if mode == "RandomForest":
+                    if rf is None:
+                        st.error("Modelo RandomForest inválido. Treine novamente.")
+                    else:
+                        if X_lab is None:
+                            st.info("RandomForest treinado. (LOO não implementado para RF nesta versão)")
+                        else:
+                            y_pred_rf = rf.predict(X_lab).astype(np.int32, copy=False)
+                            acc = float((y_pred_rf == y_lab).mean())
+                            st.info(f"Acurácia treino (RF): **{acc * 100:.1f}%**")
+                elif X_lab is None or y_lab is None:
                     st.error("Modelo inválido. Treine novamente.")
                 else:
                     Z_ref = Z_lab if (is_supcon and TORCH_OK and (head is not None) and (Z_lab is not None)) else X_lab
@@ -1141,6 +1219,7 @@ def render_label_train(cfg):
                 "MODEL_X_LAB",
                 "MODEL_Y_LAB",
                 "MODEL_IS_SUPCON",
+                "MODEL_RF",
                 "MODEL_LOG",
                 "MODEL_SUPCON_CFG",
             ]:

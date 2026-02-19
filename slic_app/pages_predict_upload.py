@@ -112,8 +112,14 @@ def render_predict_upload(cfg) -> None:
     Z_lab = st.session_state.get("MODEL_Z_LAB", None)
     is_supcon = bool(st.session_state.get("MODEL_IS_SUPCON", False))
     head = st.session_state.get("MODEL_HEAD", None)
+    model_mode = str(st.session_state.get("MODEL_MODE", "kNN"))
+    rf = st.session_state.get("MODEL_RF", None)
 
-    if X_lab is None or y_lab is None:
+    if model_mode == "RandomForest":
+        if rf is None or y_lab is None:
+            st.error("Modelo RandomForest inválido em memória. Treine novamente.")
+            return
+    elif X_lab is None or y_lab is None:
         st.error("Modelo inválido em memória. Treine novamente.")
         return
 
@@ -241,7 +247,7 @@ def render_predict_upload(cfg) -> None:
     prog = st.progress(0, text="Iniciando…")
     total_tiles = sum(1 for _ in _iter_tiles(H, W, int(tile), int(overlap)))
 
-    # referência (SupCon ou raw)
+    # referência (SupCon ou raw) para kNN
     Z_ref = Z_lab if (is_supcon and TORCH_OK and (head is not None) and (Z_lab is not None)) else X_lab
     slic_params = cfg.slic_params
 
@@ -266,10 +272,12 @@ def render_predict_upload(cfg) -> None:
         feats_t = compute_superpixel_features_cached(rgb_t, labels_t, key=key + ":feats")
         feats_tz = zscore(feats_t).astype(np.float32)
 
-        Z_all = embed_all_feats(head, feats_tz) if (is_supcon and TORCH_OK and (head is not None) and (Z_lab is not None)) else feats_tz
-
-        kk = int(min(max(1, k), len(y_lab)))
-        y_pred_spx = knn_predict_numpy_balanced(Z_ref, y_lab, Z_all, k=kk, balance=balance).astype(np.int32)
+        if model_mode == "RandomForest":
+            y_pred_spx = rf.predict(feats_tz).astype(np.int32, copy=False)
+        else:
+            Z_all = embed_all_feats(head, feats_tz) if (is_supcon and TORCH_OK and (head is not None) and (Z_lab is not None)) else feats_tz
+            kk = int(min(max(1, k), len(y_lab)))
+            y_pred_spx = knn_predict_numpy_balanced(Z_ref, y_lab, Z_all, k=kk, balance=balance).astype(np.int32)
         pred_pix = y_pred_spx[labels_t].astype(np.int32)
 
         # colar usando “miolo”
